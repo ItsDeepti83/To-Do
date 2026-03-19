@@ -12,7 +12,7 @@ app = FastAPI(title="TaskFlow API", version="1.0.0")
 # ── CORS ──────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # In production, set to your frontend URL
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -45,7 +45,7 @@ init_db()
 # ── SCHEMAS ───────────────────────────────────────────────────────────────────
 class TaskCreate(BaseModel):
     text: str
-    priority: str = "low"   # low | mid | high
+    priority: str = "low"
 
 class TaskUpdate(BaseModel):
     done: Optional[bool] = None
@@ -64,45 +64,40 @@ def row_to_dict(row):
     }
 
 async def fetch_ai_tip(task_id: int, text: str, priority: str):
-    """Call Claude API and update the task with an AI tip."""
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    """Call Google Gemini API and save a productivity tip for the task."""
+    api_key = os.getenv("GEMINI_API_KEY", "")
     if not api_key:
         return
+
+    prompt = (
+        f'Task: "{text}" Priority: {priority}\n\n'
+        "Give ONE ultra-short productivity tip for this task (max 12 words, no punctuation at end). "
+        "Be practical and specific. Reply with just the tip, nothing else."
+    )
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}",
+                headers={"Content-Type": "application/json"},
                 json={
-                    "model": "claude-sonnet-4-20250514",
-                    "max_tokens": 80,
-                    "system": (
-                        "You are a productivity assistant. For a given task, give ONE "
-                        "ultra-short tip (max 12 words, no punctuation at end). "
-                        "Be practical and specific. Reply with just the tip."
-                    ),
-                    "messages": [
-                        {"role": "user", "content": f'Task: "{text}" Priority: {priority}'}
-                    ],
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"maxOutputTokens": 60, "temperature": 0.7}
                 },
             )
-        tip = resp.json()["content"][0]["text"].strip()
+        data = resp.json()
+        tip = data["candidates"][0]["content"]["parts"][0]["text"].strip().rstrip(".!?")
         conn = get_db()
         conn.execute("UPDATE tasks SET ai_tip = ? WHERE id = ?", (tip, task_id))
         conn.commit()
         conn.close()
-    except Exception:
-        pass   # AI tip is optional — never crash the app
+    except Exception as e:
+        print(f"Gemini error: {e}")
 
 # ── ROUTES ────────────────────────────────────────────────────────────────────
 @app.get("/")
 def root():
-    return {"status": "ok", "app": "TaskFlow API"}
+    return {"status": "ok", "app": "TaskFlow API", "ai": "Google Gemini"}
 
 @app.get("/tasks")
 def get_tasks(filter: str = "all"):
@@ -134,13 +129,10 @@ async def create_task(body: TaskCreate):
     conn.commit()
     row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
     conn.close()
-
     task = row_to_dict(row)
 
-    # Fire AI tip in background (non-blocking)
     import asyncio
     asyncio.create_task(fetch_ai_tip(task_id, body.text, body.priority))
-
     return task
 
 @app.patch("/tasks/{task_id}")
